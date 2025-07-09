@@ -1,6 +1,6 @@
 # Modular API
 
-A flexible and extensible Go package for handling API requests with modular templating.
+A flexible and extensible Go package for handling API requests with modular templating and workflow capabilities.
 
 ## Features
 
@@ -11,7 +11,10 @@ A flexible and extensible Go package for handling API requests with modular temp
 - **Template persistence**: Save and load templates from JSON files
 - **Flexible parameter handling**: Support for path parameters, query parameters, and body parameters
 - **Optional parameters**: Mark parameters as optional with the `?` suffix
-- **Clean separation of concerns**: Each component is separated into its own package for better maintainability
+- **Workflows**: Chain multiple API calls with dependencies between them
+- **Parallel execution**: Execute workflow steps in parallel
+- **Conditional execution**: Execute workflow steps based on conditions
+- **Result mapping**: Map response fields to variables for use in subsequent steps
 
 ## Installation
 
@@ -36,7 +39,7 @@ import (
 func main() {
     // Create a new service builder
     builder := modularapi.NewServiceBuilder().
-        WithTimeout(180 * time.Second).
+        WithTimeout(30 * time.Second).
         WithService("MyAPI", "https://api.example.com", "YOUR_API_TOKEN").
         WithServiceDefaultParams("MyAPI", map[string]interface{}{
             "version": "v1",
@@ -65,87 +68,16 @@ func main() {
 }
 ```
 
-## Template Syntax
+## Documentation
 
-Templates are defined using a simple syntax:
+For more detailed documentation, please refer to the [documentation index](docs/index.md) or the following guides:
 
-- **Path parameters**: `{{parameter_name}}` for required parameters, `{{parameter_name?}}` for optional parameters
-- **Query parameters**: Define in the `QueryParams` map
-- **Body parameters**: Define in the `Body` map
-
-Example template:
-
-```go
-template.NewRouteTemplate(
-    "POST",
-    "/api/{{version}}/users/",
-).WithBody(map[string]interface{}{
-    "name": "{{name}}",
-    "email": "{{email}}",
-    "age": "{{age?}}", // Optional parameter
-    "address": "{{address?}}", // Optional parameter
-})
-```
-
-## Loading and Saving Templates
-
-You can save templates to a JSON file and load them later:
-
-```go
-// Save templates to file
-err := service.SaveTemplates("templates.json")
-if err != nil {
-    log.Fatalf("Error saving templates: %v", err)
-}
-
-// Load templates from file
-err = service.LoadTemplates("templates.json")
-if err != nil {
-    log.Fatalf("Error loading templates: %v", err)
-}
-```
-
-## Service-level Configuration
-
-You can configure headers and parameters at the service level:
-
-```go
-// Set headers for a service
-service.SetServiceHeaders("MyAPI", map[string]string{
-    "Content-Type": "application/json",
-    "X-API-Version": "1.0",
-})
-
-// Set parameters for a service
-service.SetServiceParams("MyAPI", map[string]interface{}{
-    "version": "v1",
-    "language": "en",
-})
-```
-
-## Streaming Requests
-
-Handle streaming requests with the `PerformStreamingRequest` method:
-
-```go
-http.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
-    _, err := service.PerformStreamingRequest("MyAPI", "StreamData", map[string]interface{}{
-        "user_id": "123",
-    }, w)
-    
-    if err != nil {
-        http.Error(w, fmt.Sprintf("Error: %v", err), http.StatusInternalServerError)
-    }
-})
-```
-
-## Future Enhancements
-
-- API workflows: Chain multiple API calls with the results of previous calls
-- Custom request/response processors
-- Authentication mechanisms
-- Rate limiting and retries
-- Testing utilities
+- [Getting Started](docs/getting_started.md) - Basic setup and usage
+- [Templates](docs/templates.md) - Working with API templates
+- [Services](docs/services.md) - Configuring and using services
+- [Workflows](docs/workflows.md) - Creating and executing workflows
+- [Advanced Features](docs/advanced_features.md) - Advanced features and techniques
+- [Examples](docs/examples.md) - Practical examples of common use cases
 
 ## License
 

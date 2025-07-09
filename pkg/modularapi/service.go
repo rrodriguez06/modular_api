@@ -12,6 +12,7 @@ import (
 	"github.com/rrodriguez06/modular_api/pkg/modularapi/client"
 	"github.com/rrodriguez06/modular_api/pkg/modularapi/config"
 	"github.com/rrodriguez06/modular_api/pkg/modularapi/template"
+	"github.com/rrodriguez06/modular_api/pkg/modularapi/workflow"
 )
 
 // Service is the main interface for the modular API service
@@ -22,6 +23,7 @@ type Service interface {
 	MakeStreamingRequest(req *http.Request, w http.ResponseWriter) (string, error)
 	PerformRequest(serviceName, action string, params map[string]interface{}, result interface{}) error
 	PerformStreamingRequest(serviceName, action string, params map[string]interface{}, w http.ResponseWriter) (string, error)
+	ExecuteRequestWithParams(templateID string, params map[string]interface{}) (json.RawMessage, error)
 
 	// Template management
 	AddRouteTemplate(serviceName, action string, route template.RouteTemplate)
@@ -42,21 +44,31 @@ type Service interface {
 	SetServiceParams(serviceName string, params map[string]interface{})
 	GetServiceParams(serviceName string) map[string]interface{}
 	RemoveServiceParam(serviceName string, paramName string)
+
+	// Workflow management
+	RegisterWorkflow(wf workflow.Workflow) error
+	AddWorkflowStep(workflowName string, step workflow.WorkflowStep) error
+	ExecuteWorkflow(name string, params map[string]interface{}, result interface{}) (map[string]interface{}, error)
+	GetWorkflow(name string) (workflow.Workflow, bool)
+	ListWorkflows() []string
+	SaveWorkflows(filepath string) error
+	LoadWorkflows(filepath string) error
 }
 
 // ModularAPIService implements the Service interface
 type ModularAPIService struct {
-	config         *config.Config
-	templateStore  *template.TemplateStore
-	httpClient     *client.Client
-	streamClient   *client.StreamingClient
-	serviceHeaders map[string]map[string]string      // Service-level headers
-	serviceParams  map[string]map[string]interface{} // Service-level parameters
+	config           *config.Config
+	templateStore    *template.TemplateStore
+	httpClient       *client.Client
+	streamClient     *client.StreamingClient
+	serviceHeaders   map[string]map[string]string      // Service-level headers
+	serviceParams    map[string]map[string]interface{} // Service-level parameters
+	workflowExecutor *workflow.WorkflowExecutor        // Workflow executor
 }
 
 // NewService creates a new modular API service
 func NewService(cfg *config.Config) Service {
-	return &ModularAPIService{
+	service := &ModularAPIService{
 		config:         cfg,
 		templateStore:  template.NewTemplateStore(),
 		httpClient:     client.NewClient(180 * time.Second), // Default timeout of 3 minutes
@@ -64,6 +76,11 @@ func NewService(cfg *config.Config) Service {
 		serviceHeaders: make(map[string]map[string]string),
 		serviceParams:  make(map[string]map[string]interface{}),
 	}
+
+	// Initialize workflow executor after the service is created
+	service.workflowExecutor = workflow.NewWorkflowExecutor(service)
+
+	return service
 }
 
 // PrepareRequest prepares a request using the template and provided parameters
@@ -207,16 +224,10 @@ func (s *ModularAPIService) PrepareRequest(serviceName, action string, params ma
 		req.Header.Set(key, value)
 	}
 
-	// 3. Standard headers
-	req.Header.Set("accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
+	// 3. Authorization header if token is provided
 	if cfg.ApiToken != "" {
 		req.Header.Set("Authorization", "Bearer "+cfg.ApiToken)
 	}
-
-	// 4. CORS headers
-	req.Header.Add("Access-Control-Allow-Origin", "*")
-	req.Header.Add("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 
 	// Process query parameters from template only
 	if tmpl.QueryParams != nil {
@@ -379,4 +390,77 @@ func (s *ModularAPIService) RemoveServiceParam(serviceName string, paramName str
 	if params, ok := s.serviceParams[serviceName]; ok {
 		delete(params, paramName)
 	}
+}
+
+// ExecuteRequestWithParams is a helper method for executing a request with parameters
+func (s *ModularAPIService) ExecuteRequestWithParams(templateID string, params map[string]interface{}) (json.RawMessage, error) {
+	// Split template ID into service and action
+	parts := workflow.SplitTemplateID(templateID)
+	if len(parts) != 2 {
+		return nil, workflow.ErrInvalidTemplateID
+	}
+
+	serviceName, actionName := parts[0], parts[1]
+
+	// Use a map to receive the JSON response
+	var result map[string]interface{}
+
+	// Execute the request
+	err := s.PerformRequest(serviceName, actionName, params, &result)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert back to JSON for the raw message
+	return json.Marshal(result)
+}
+
+// RegisterWorkflow registers a new workflow with the service
+func (s *ModularAPIService) RegisterWorkflow(wf workflow.Workflow) error {
+	return s.workflowExecutor.RegisterWorkflow(wf)
+}
+
+// AddWorkflowStep adds a step to an existing workflow or creates a new workflow if it doesn't exist
+func (s *ModularAPIService) AddWorkflowStep(workflowName string, step workflow.WorkflowStep) error {
+	// Check if workflow exists
+	existingWorkflow, exists := s.GetWorkflow(workflowName)
+
+	if !exists {
+		// Create a new workflow with this step
+		newWorkflow := workflow.Workflow{
+			Name:  workflowName,
+			Steps: []workflow.WorkflowStep{step},
+		}
+		return s.RegisterWorkflow(newWorkflow)
+	}
+
+	// Add step to existing workflow
+	existingWorkflow.Steps = append(existingWorkflow.Steps, step)
+	return s.RegisterWorkflow(existingWorkflow)
+}
+
+// ExecuteWorkflow executes a workflow with the given parameters
+// If result is not nil, the response from the last step will be unmarshaled into it
+func (s *ModularAPIService) ExecuteWorkflow(name string, params map[string]interface{}, result interface{}) (map[string]interface{}, error) {
+	return s.workflowExecutor.ExecuteWorkflow(name, params, result)
+}
+
+// GetWorkflow returns a workflow by name
+func (s *ModularAPIService) GetWorkflow(name string) (workflow.Workflow, bool) {
+	return s.workflowExecutor.GetWorkflow(name)
+}
+
+// ListWorkflows returns a list of all registered workflow names
+func (s *ModularAPIService) ListWorkflows() []string {
+	return s.workflowExecutor.ListWorkflows()
+}
+
+// SaveWorkflows saves all workflows to a file
+func (s *ModularAPIService) SaveWorkflows(filepath string) error {
+	return s.workflowExecutor.SaveWorkflows(filepath)
+}
+
+// LoadWorkflows loads workflows from a file
+func (s *ModularAPIService) LoadWorkflows(filepath string) error {
+	return s.workflowExecutor.LoadWorkflows(filepath)
 }

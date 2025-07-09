@@ -6,6 +6,7 @@ import (
 	"github.com/rrodriguez06/modular_api/internal/log"
 	"github.com/rrodriguez06/modular_api/pkg/modularapi/config"
 	"github.com/rrodriguez06/modular_api/pkg/modularapi/template"
+	"github.com/rrodriguez06/modular_api/pkg/modularapi/workflow"
 )
 
 // ServiceBuilder is a builder for creating a modular API service
@@ -15,6 +16,7 @@ type ServiceBuilder struct {
 	templates      map[string]map[string]template.RouteTemplate
 	serviceHeaders map[string]map[string]string
 	serviceParams  map[string]map[string]interface{}
+	workflows      map[string]workflow.Workflow
 	timeout        time.Duration
 	logLevel       log.LogLevel
 }
@@ -26,6 +28,7 @@ func NewServiceBuilder() *ServiceBuilder {
 		templates:      make(map[string]map[string]template.RouteTemplate),
 		serviceHeaders: make(map[string]map[string]string),
 		serviceParams:  make(map[string]map[string]interface{}),
+		workflows:      make(map[string]workflow.Workflow),
 		timeout:        180 * time.Second, // Default timeout of 3 minutes
 		logLevel:       log.INFO,          // Default log level
 	}
@@ -145,6 +148,11 @@ func (b *ServiceBuilder) Build() Service {
 	// Add service parameters
 	for serviceName, params := range b.serviceParams {
 		svc.SetServiceParams(serviceName, params)
+	}
+
+	// Register workflows
+	for _, wf := range b.workflows {
+		svc.RegisterWorkflow(wf)
 	}
 
 	return svc

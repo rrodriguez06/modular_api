@@ -45,7 +45,6 @@ func (c *StreamingClient) MakeStreamingRequest(req *http.Request, w http.Respons
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*") // optional CORS header
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
