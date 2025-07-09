@@ -21,7 +21,7 @@ type Service interface {
 	PrepareRequest(serviceName, action string, params map[string]interface{}) (*http.Request, error)
 	MakeRequest(req *http.Request, result interface{}) error
 	MakeStreamingRequest(req *http.Request, w http.ResponseWriter) (string, error)
-	PerformRequest(serviceName, action string, params map[string]interface{}, result interface{}) error
+	PerformRequest(serviceName, action string, params map[string]interface{}, result interface{}, opts ...RequestOption) error
 	PerformStreamingRequest(serviceName, action string, params map[string]interface{}, w http.ResponseWriter) (string, error)
 	ExecuteRequestWithParams(templateID string, params map[string]interface{}) (json.RawMessage, error)
 
@@ -48,7 +48,7 @@ type Service interface {
 	// Workflow management
 	RegisterWorkflow(wf workflow.Workflow) error
 	AddWorkflowStep(workflowName string, step workflow.WorkflowStep) error
-	ExecuteWorkflow(name string, params map[string]interface{}, result interface{}) (map[string]interface{}, error)
+	ExecuteWorkflow(name string, params map[string]interface{}, result interface{}, opts ...ExecutionOption) error
 	GetWorkflow(name string) (workflow.Workflow, bool)
 	ListWorkflows() []string
 	SaveWorkflows(filepath string) error
@@ -264,7 +264,25 @@ func (s *ModularAPIService) MakeStreamingRequest(req *http.Request, w http.Respo
 }
 
 // PerformRequest combines PrepareRequest and MakeRequest into a single function
-func (s *ModularAPIService) PerformRequest(serviceName, action string, params map[string]interface{}, result interface{}) error {
+func (s *ModularAPIService) PerformRequest(serviceName, action string, params map[string]interface{}, result interface{}, opts ...RequestOption) error {
+	// Process request options
+	cfg := &requestConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// Set log level if provided
+	if cfg.LogLevel != nil {
+		// Store the original log level to restore later
+		var originalLogLevel log.LogLevel
+		if logger, ok := log.GlobalLogger.(*log.DefaultLogger); ok {
+			originalLogLevel = logger.GetLogLevel()
+			log.SetLogLevel(*cfg.LogLevel)
+			// Defer restoring the original log level
+			defer log.SetLogLevel(originalLogLevel)
+		}
+	}
+
 	req, err := s.PrepareRequest(serviceName, action, params)
 	if err != nil {
 		return fmt.Errorf("failed to prepare request: %w", err)
@@ -439,10 +457,36 @@ func (s *ModularAPIService) AddWorkflowStep(workflowName string, step workflow.W
 	return s.RegisterWorkflow(existingWorkflow)
 }
 
-// ExecuteWorkflow executes a workflow with the given parameters
+// ExecuteWorkflow executes a workflow with the given parameters and options
 // If result is not nil, the response from the last step will be unmarshaled into it
-func (s *ModularAPIService) ExecuteWorkflow(name string, params map[string]interface{}, result interface{}) (map[string]interface{}, error) {
-	return s.workflowExecutor.ExecuteWorkflow(name, params, result)
+func (s *ModularAPIService) ExecuteWorkflow(name string, params map[string]interface{}, result interface{}, opts ...ExecutionOption) error {
+	// Create and apply configuration
+	cfg := &executionConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// Set log level if provided
+	if cfg.LogLevel != nil {
+		// Store the original log level to restore later
+		var originalLogLevel log.LogLevel
+		if logger, ok := log.GlobalLogger.(*log.DefaultLogger); ok {
+			originalLogLevel = logger.GetLogLevel()
+			log.SetLogLevel(*cfg.LogLevel)
+			// Defer restoring the original log level
+			defer log.SetLogLevel(originalLogLevel)
+		}
+	}
+
+	// Execute the workflow
+	workflowVars, err := s.workflowExecutor.ExecuteWorkflow(name, params, result)
+
+	// If workflow vars option was provided, populate it
+	if err == nil && cfg.WorkflowVars != nil {
+		*cfg.WorkflowVars = workflowVars
+	}
+
+	return err
 }
 
 // GetWorkflow returns a workflow by name

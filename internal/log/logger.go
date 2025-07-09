@@ -46,6 +46,11 @@ type DefaultLogger struct {
 	fatal *log.Logger
 }
 
+// GetLogLevel returns the current log level
+func (l *DefaultLogger) GetLogLevel() LogLevel {
+	return l.level
+}
+
 // NewDefaultLogger creates a new default logger with the specified log level
 func NewDefaultLogger(level LogLevel) Logger {
 	return &DefaultLogger{
