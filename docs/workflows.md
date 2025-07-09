@@ -165,3 +165,57 @@ builder.WithWorkflow("user_dashboard", "Get user dashboard data").
 ```
 
 In this example, the `get_user_posts` and `get_user_followers` steps will execute in parallel after the `get_user` step completes.
+
+## Loop Execution
+
+Workflows can loop over arrays and execute a step for each item:
+
+```go
+// Step 1: Get all patient IDs for a user
+getUserPatientsStep := modularapi.NewWorkflowStepTemplate("get_user_patients", "Get patient IDs", "API", "GetUserPatients").
+    WithParam("user_id", "{{user_id}}").
+    WithResultMap("response.patient_ids", "patient_id_list")
+
+// Step 2: Loop over each patient ID and get details
+getPatientDetailsStep := modularapi.NewWorkflowStepTemplate("get_patient_details", "Get patient details", "API", "GetPatient").
+    WithDynamicParam("patient_id", "current_item").          // Use the current loop item
+    WithLoopOver("patient_id_list", "current_item").         // Specify loop source and item variable
+    WithResultMap("response", "patient_details_collection")  // Results collected in an array
+```
+
+The `WithLoopOver` method takes two parameters:
+
+1. The name of a workflow variable containing an array to iterate over
+2. The name to give each item in the array during iteration
+
+Each iteration's result is collected into an array under the same variable names specified in the result mapping. The loop step also provides an additional variable named `current_item_index` containing the current iteration index.
+
+## Result Aggregation
+
+Workflows can aggregate results from multiple steps into a structured final output:
+
+```go
+builder.WithWorkflow("get_all_patient_details", "Get details for all patients").
+    WithStep(getUserDetailsStep).
+    WithStep(getUserPatientsStep).
+    WithStep(getPatientDetailsStep).  // This is a loop step
+    WithAggregator(map[string]string{
+        "user": "user_data",                             // Include user data
+        "patients": "patient_details_collection",        // Include all patient details
+        "patient_count": "patient_details_collection.length",  // Count patients
+        "user_id": "input.user_id",                      // Include original input
+    }).
+    Build()
+```
+
+The `WithAggregator` method takes a map where:
+
+- Keys are field names in the final output structure
+- Values are expressions to evaluate against workflow variables
+
+Supported expressions:
+
+- Simple variable names: `"user_data"`
+- Array length: `"patient_list.length"`
+- Input parameters: `"input.user_id"`
+- Nested paths: `"user_data.profile.name"`

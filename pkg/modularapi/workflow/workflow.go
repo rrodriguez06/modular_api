@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -66,6 +68,8 @@ type WorkflowStep struct {
 	ErrorHandling ErrorHandlingStrategy  `json:"error_handling,omitempty"` // How to handle errors
 	MaxRetries    int                    `json:"max_retries,omitempty"`    // Maximum number of retries (for retry strategy)
 	RetryDelayMs  int                    `json:"retry_delay_ms,omitempty"` // Delay between retries in milliseconds
+	LoopOver      string                 `json:"loop_over,omitempty"`      // Name of variable containing array to iterate over
+	LoopAs        string                 `json:"loop_as,omitempty"`        // Name of the variable to store current item in the loop
 }
 
 // Workflow defines a sequence of API calls with dependencies between them
@@ -73,7 +77,8 @@ type Workflow struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	Steps       []WorkflowStep         `json:"steps"`
-	Variables   map[string]interface{} `json:"variables,omitempty"` // Default workflow variables
+	Variables   map[string]interface{} `json:"variables,omitempty"`  // Default workflow variables
+	Aggregator  map[string]string      `json:"aggregator,omitempty"` // Mapping for result aggregation
 }
 
 // WorkflowService defines the interface for working with workflows
@@ -197,6 +202,11 @@ func (we *WorkflowExecutor) ExecuteWorkflow(name string, initialParams map[strin
 	for i := 0; i < len(workflow.Steps); i++ {
 		step := workflow.Steps[i]
 
+		// Skip if this step was already executed in parallel
+		if executedSteps[step.ID] {
+			continue
+		}
+
 		// Check if this step should run in parallel with others
 		parallelSteps := []WorkflowStep{step}
 		for j := i + 1; j < len(workflow.Steps); j++ {
@@ -211,111 +221,177 @@ func (we *WorkflowExecutor) ExecuteWorkflow(name string, initialParams map[strin
 			}
 		}
 
-		// Skip if this step was already executed in parallel
-		if executedSteps[step.ID] {
-			continue
-		}
+		// Execute steps (either normally or as loops)
+		for _, parallelStep := range parallelSteps {
+			if parallelStep.LoopOver != "" {
+				// Handle loop step
+				loopResults, err := we.executeLoopStep(parallelStep, variables)
+				if err != nil {
+					// Apply error handling strategy
+					// Default to abort on error if not specified
+					strategy := AbortOnError
+					if parallelStep.ErrorHandling != "" {
+						strategy = parallelStep.ErrorHandling
+					}
 
-		// Execute parallel steps
-		results := we.executeParallelSteps(parallelSteps, variables)
-
-		// Process results
-		for _, result := range results {
-			// Mark step as executed
-			executedSteps[result.StepID] = true
-
-			// Handle errors based on strategy
-			if result.Error != nil {
-				// Find the step with this ID
-				var errorStep *WorkflowStep
-				for _, s := range parallelSteps {
-					if s.ID == result.StepID {
-						errorStep = &s
-						break
+					switch strategy {
+					case ContinueOnError:
+						// Just continue to next step
+						continue
+					case RetryOnError:
+						return nil, fmt.Errorf("retry strategy not implemented for loop steps")
+					case AbortOnError:
+						// Default behavior - abort workflow
+						return nil, fmt.Errorf("workflow loop step %s failed: %w", parallelStep.ID, err)
 					}
 				}
 
-				// Default to abort on error if not specified
-				strategy := AbortOnError
-				if errorStep != nil && errorStep.ErrorHandling != "" {
-					strategy = errorStep.ErrorHandling
+				// Process all loop iteration results
+				if len(loopResults) > 0 {
+					// Store the collective results in a variable with the same name as the result mapping
+					// This collects all iteration results into arrays
+					collectedResults := make(map[string][]interface{})
+
+					for _, loopResult := range loopResults {
+						executedSteps[loopResult.StepID] = true
+						stepResults[loopResult.StepID] = loopResult.Result
+
+						// For each result mapping, collect values into arrays
+						for responseField, variableName := range parallelStep.ResultMapping {
+							value, ok := extractValue(loopResult.Result, responseField)
+							if ok {
+								if collectedResults[variableName] == nil {
+									collectedResults[variableName] = make([]interface{}, 0)
+								}
+								collectedResults[variableName] = append(collectedResults[variableName], value)
+							}
+						}
+					}
+
+					// Store the collected arrays in the workflow variables
+					for variableName, collectedValues := range collectedResults {
+						variables[variableName] = collectedValues
+						log.Printf("Collected %d results for loop step %s in variable '%s'",
+							len(collectedValues), parallelStep.ID, variableName)
+					}
 				}
+			} else {
+				// Normal (non-loop) step execution
+				results := we.executeParallelSteps([]WorkflowStep{parallelStep}, variables)
 
-				// Handle error based on strategy
-				switch strategy {
-				case ContinueOnError:
-					// Just continue to next step
-					continue
-				case RetryOnError:
-					// Not implemented in this version
-					// Would need loop and delay logic
-					return nil, fmt.Errorf("retry strategy not implemented")
-				case AbortOnError:
-					// Default behavior - abort workflow
-					return nil, fmt.Errorf("workflow step %s failed: %w", result.StepID, result.Error)
-				}
-			}
+				// Process results
+				for _, stepResult := range results {
+					// Mark step as executed
+					executedSteps[stepResult.StepID] = true
 
-			// Store result for this step
-			stepResults[result.StepID] = result.Result
+					// Handle errors based on strategy
+					if stepResult.Error != nil {
+						// Default to abort on error if not specified
+						strategy := AbortOnError
+						if parallelStep.ErrorHandling != "" {
+							strategy = parallelStep.ErrorHandling
+						}
 
-			// Update variables based on result mapping
-			// Find the step with this ID to get mapping
-			for _, s := range parallelSteps {
-				if s.ID == result.StepID {
-					for responseField, variableName := range s.ResultMapping {
+						// Handle error based on strategy
+						switch strategy {
+						case ContinueOnError:
+							// Just continue to next step
+							continue
+						case RetryOnError:
+							// Not implemented in this version
+							return nil, fmt.Errorf("retry strategy not implemented")
+						case AbortOnError:
+							// Default behavior - abort workflow
+							return nil, fmt.Errorf("workflow step %s failed: %w", stepResult.StepID, stepResult.Error)
+						}
+					}
+
+					// Store result for this step
+					stepResults[stepResult.StepID] = stepResult.Result
+
+					// Update variables based on result mapping
+					for responseField, variableName := range parallelStep.ResultMapping {
 						// Extract value using dot notation
-						value, ok := extractValue(result.Result, responseField)
+						value, ok := extractValue(stepResult.Result, responseField)
 						if ok {
 							variables[variableName] = value
 							log.Printf("Mapped result field '%s' to variable '%s' with value: %v",
 								responseField, variableName, value)
 						} else {
 							log.Printf("Warning: Could not extract field '%s' from response for step %s",
-								responseField, s.ID)
+								responseField, stepResult.StepID)
 
 							// Debug: print the available fields in the result
 							resultKeys := make([]string, 0)
-							for k := range result.Result {
+							for k := range stepResult.Result {
 								resultKeys = append(resultKeys, k)
 							}
 							log.Printf("Available fields in response: %v", resultKeys)
 						}
 					}
-					break
 				}
 			}
 		}
 	}
 
-	// If result parameter is provided and we had any steps, map the last step's response to it
-	if result != nil && len(workflow.Steps) > 0 {
-		// Find the last step that was executed
-		var lastStepResult map[string]interface{}
-		var lastStepID string
+	// Process result based on aggregator if defined
+	if result != nil {
+		if workflow.Aggregator != nil && len(workflow.Aggregator) > 0 {
+			// Build the aggregated result structure
+			aggregatedResult := make(map[string]interface{})
 
-		// Go through steps in reverse order to find the last executed one
-		for i := len(workflow.Steps) - 1; i >= 0; i-- {
-			step := workflow.Steps[i]
-			if stepResult, exists := stepResults[step.ID]; exists {
-				lastStepResult = stepResult
-				lastStepID = step.ID
-				break
+			// Apply each aggregator mapping
+			for resultField, variableExpr := range workflow.Aggregator {
+				// Check if this is a simple variable reference or an expression
+				value, err := evaluateAggregatorExpression(variableExpr, variables)
+				if err != nil {
+					log.Printf("Warning: Error evaluating aggregator expression '%s': %v", variableExpr, err)
+					continue
+				}
+
+				aggregatedResult[resultField] = value
 			}
-		}
 
-		if lastStepResult != nil {
-			// Convert to JSON and unmarshal to the result
-			jsonData, err := json.Marshal(lastStepResult)
+			// Convert the aggregated result to JSON and unmarshal to the result parameter
+			jsonData, err := json.Marshal(aggregatedResult)
 			if err != nil {
-				return variables, fmt.Errorf("error marshaling last step result: %w", err)
+				return variables, fmt.Errorf("error marshaling aggregated result: %w", err)
 			}
 
 			if err := json.Unmarshal(jsonData, result); err != nil {
-				return variables, fmt.Errorf("error unmarshaling last step result to provided result variable: %w", err)
+				return variables, fmt.Errorf("error unmarshaling aggregated result to provided result variable: %w", err)
 			}
 
-			log.Printf("Mapped last step (%s) response to result parameter", lastStepID)
+			log.Printf("Applied aggregator to create final result")
+		} else {
+			// No aggregator defined - use the last step's result (original behavior)
+			// Find the last step that was executed
+			var lastStepResult map[string]interface{}
+			var lastStepID string
+
+			// Go through steps in reverse order to find the last executed one
+			for i := len(workflow.Steps) - 1; i >= 0; i-- {
+				step := workflow.Steps[i]
+				if stepResult, exists := stepResults[step.ID]; exists {
+					lastStepResult = stepResult
+					lastStepID = step.ID
+					break
+				}
+			}
+
+			if lastStepResult != nil {
+				// Convert to JSON and unmarshal to the result
+				jsonData, err := json.Marshal(lastStepResult)
+				if err != nil {
+					return variables, fmt.Errorf("error marshaling last step result: %w", err)
+				}
+
+				if err := json.Unmarshal(jsonData, result); err != nil {
+					return variables, fmt.Errorf("error unmarshaling last step result to provided result variable: %w", err)
+				}
+
+				log.Printf("Mapped last step (%s) response to result parameter", lastStepID)
+			}
 		}
 	}
 
@@ -427,6 +503,190 @@ func (we *WorkflowExecutor) executeParallelSteps(steps []WorkflowStep, variables
 	}
 
 	return results
+}
+
+// executeLoopStep executes a step for each item in an array variable.
+// It returns a result for each iteration.
+func (we *WorkflowExecutor) executeLoopStep(step WorkflowStep, variables map[string]interface{}) ([]stepExecutionResult, error) {
+	// Get the array to iterate over
+	arrayVar, exists := variables[step.LoopOver]
+	if !exists {
+		return nil, fmt.Errorf("loop variable '%s' not found in workflow variables", step.LoopOver)
+	}
+
+	// Convert to array if it's not already
+	array, ok := toArray(arrayVar)
+	if !ok {
+		return nil, fmt.Errorf("loop variable '%s' is not an array (type: %T)", step.LoopOver, arrayVar)
+	}
+
+	if len(array) == 0 {
+		log.Printf("Loop variable '%s' is an empty array, skipping loop step", step.LoopOver)
+		return []stepExecutionResult{}, nil
+	}
+
+	// Create a copy of the variables to avoid conflicts between iterations
+	var results []stepExecutionResult
+
+	// Process each item in the array
+	for i, item := range array {
+		// Create a copy of the variables for this iteration
+		iterationVars := make(map[string]interface{})
+		for k, v := range variables {
+			iterationVars[k] = v
+		}
+
+		// Add the current item to the variables using the specified name
+		iterationVars[step.LoopAs] = item
+
+		// Add the index as a variable too
+		iterationVars[step.LoopAs+"_index"] = i
+
+		// Add a modified step ID for this iteration for tracking
+		iterationStepID := fmt.Sprintf("%s[%d]", step.ID, i)
+
+		// Execute the step for this item
+		iterationStep := step // Create a copy of the step
+		iterationStep.ID = iterationStepID
+
+		// Execute the step
+		stepResults := we.executeParallelSteps([]WorkflowStep{iterationStep}, iterationVars)
+		if len(stepResults) == 0 {
+			continue // Step was skipped (e.g., condition not met)
+		}
+
+		// Get the result for this iteration
+		iterationResult := stepResults[0]
+
+		// Check for errors
+		if iterationResult.Error != nil {
+			// If error strategy is to abort, return error immediately
+			if step.ErrorHandling == "" || step.ErrorHandling == AbortOnError {
+				return results, fmt.Errorf("loop iteration %d failed: %w", i, iterationResult.Error)
+			}
+
+			// If continue on error, just log and skip this iteration
+			if step.ErrorHandling == ContinueOnError {
+				log.Printf("Warning: Loop iteration %d failed: %v (continuing)", i, iterationResult.Error)
+				continue
+			}
+		}
+
+		// Add this iteration's result to the results array
+		results = append(results, iterationResult)
+	}
+
+	return results, nil
+}
+
+// toArray converts a value to an array if possible
+func toArray(value interface{}) ([]interface{}, bool) {
+	// If it's already a []interface{}
+	if array, ok := value.([]interface{}); ok {
+		return array, true
+	}
+
+	// Use reflection to handle other array/slice types
+	v := reflect.ValueOf(value)
+	if v.Kind() == reflect.Slice || v.Kind() == reflect.Array {
+		length := v.Len()
+		result := make([]interface{}, length)
+		for i := 0; i < length; i++ {
+			result[i] = v.Index(i).Interface()
+		}
+		return result, true
+	}
+
+	return nil, false
+}
+
+// evaluateAggregatorExpression evaluates an expression in the aggregator mapping.
+// It supports simple variable references, JSON path expressions, and special operations like .length
+func evaluateAggregatorExpression(expr string, variables map[string]interface{}) (interface{}, error) {
+	// Handle special case for array length: variable.length
+	if strings.HasSuffix(expr, ".length") {
+		varName := strings.TrimSuffix(expr, ".length")
+		if value, exists := variables[varName]; exists {
+			if array, ok := toArray(value); ok {
+				return len(array), nil
+			}
+			if str, ok := value.(string); ok {
+				return len(str), nil
+			}
+			if m, ok := value.(map[string]interface{}); ok {
+				return len(m), nil
+			}
+			return 0, fmt.Errorf("cannot get length of type %T", value)
+		}
+		return 0, fmt.Errorf("variable '%s' not found for length operation", varName)
+	}
+
+	// Handle expressions with dot notation (e.g., "input.user_id")
+	if strings.Contains(expr, ".") && !strings.HasPrefix(expr, "{{") {
+		parts := strings.SplitN(expr, ".", 2)
+		baseVar := parts[0]
+		path := parts[1]
+
+		if baseVar == "input" {
+			// Access directly from the variables
+			value, ok := extractValue(variables, path)
+			if ok {
+				return value, nil
+			}
+			return nil, fmt.Errorf("could not extract path '%s' from input", path)
+		} else {
+			// Get the base object first
+			baseObj, exists := variables[baseVar]
+			if !exists {
+				return nil, fmt.Errorf("variable '%s' not found", baseVar)
+			}
+
+			// Convert to map if possible
+			baseMap, ok := baseObj.(map[string]interface{})
+			if !ok {
+				return nil, fmt.Errorf("variable '%s' is not an object (type: %T)", baseVar, baseObj)
+			}
+
+			// Extract the value from the base object
+			value, ok := extractValue(baseMap, path)
+			if ok {
+				return value, nil
+			}
+			return nil, fmt.Errorf("could not extract path '%s' from variable '%s'", path, baseVar)
+		}
+	}
+
+	// Simple variable reference
+	if value, exists := variables[expr]; exists {
+		return value, nil
+	}
+
+	// Check if this is a template expression
+	if isExpression(expr) {
+		return evaluateExpression(expr, variables)
+	}
+
+	// If it's a literal value (not a variable reference)
+	if !strings.Contains(expr, "{{") && !strings.Contains(expr, "}}") {
+		// Try to parse as number or boolean
+		if expr == "true" {
+			return true, nil
+		} else if expr == "false" {
+			return false, nil
+		} else if expr == "null" {
+			return nil, nil
+		}
+
+		// Try to parse as number
+		if num, err := strconv.ParseFloat(expr, 64); err == nil {
+			return num, nil
+		}
+
+		// Return as string literal
+		return expr, nil
+	}
+
+	return nil, fmt.Errorf("could not evaluate expression: %s", expr)
 }
 
 // GetWorkflow implements WorkflowService

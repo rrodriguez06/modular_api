@@ -15,6 +15,8 @@ A flexible and extensible Go package for handling API requests with modular temp
 - **Parallel execution**: Execute workflow steps in parallel
 - **Conditional execution**: Execute workflow steps based on conditions
 - **Result mapping**: Map response fields to variables for use in subsequent steps
+- **Loop execution**: Iterate over arrays and execute steps for each item
+- **Result aggregation**: Combine results from multiple steps into structured outputs
 
 ## Installation
 

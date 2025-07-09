@@ -19,6 +19,8 @@ type WorkflowStepTemplate struct {
 	ParallelWith  []string
 	ErrorHandling workflow.ErrorHandlingStrategy
 	MaxRetries    int
+	LoopOver      string // Name of variable containing array to iterate over
+	LoopAs        string // Name of the variable to store current item in the loop
 }
 
 // NewStepTemplate creates a new workflow step template
@@ -86,6 +88,15 @@ func (t *WorkflowStepTemplate) WithErrorHandling(strategy workflow.ErrorHandling
 	return t
 }
 
+// WithLoopOver configures a step to be executed multiple times, once for each element in the specified array variable.
+// The current element will be available in the workflow variables using the itemVariable name.
+// The results of all iterations will be collected in an array stored in the workflow variables using the step's result mapping.
+func (t *WorkflowStepTemplate) WithLoopOver(arrayVariable, itemVariable string) *WorkflowStepTemplate {
+	t.LoopOver = arrayVariable
+	t.LoopAs = itemVariable
+	return t
+}
+
 // toWorkflowStep converts the template to a workflow.WorkflowStep
 func (t *WorkflowStepTemplate) toWorkflowStep() workflow.WorkflowStep {
 	return workflow.WorkflowStep{
@@ -100,6 +111,8 @@ func (t *WorkflowStepTemplate) toWorkflowStep() workflow.WorkflowStep {
 		ParallelWith:  t.ParallelWith,
 		ErrorHandling: t.ErrorHandling,
 		MaxRetries:    t.MaxRetries,
+		LoopOver:      t.LoopOver,
+		LoopAs:        t.LoopAs,
 	}
 }
 
@@ -133,6 +146,23 @@ func (wb *WorkflowBuilder) WithVariable(name string, value interface{}) *Workflo
 		wb.workflow.Variables = make(map[string]interface{})
 	}
 	wb.workflow.Variables[name] = value
+	return wb
+}
+
+// WithAggregator adds a result aggregator to the workflow.
+// The aggregator maps workflow variables to fields in the final result.
+// This allows combining results from multiple steps, including loop iterations,
+// into a structured final result.
+// Example: {"users": "user_list", "count": "user_count"}
+func (wb *WorkflowBuilder) WithAggregator(mapping map[string]string) *WorkflowBuilder {
+	if wb.workflow.Aggregator == nil {
+		wb.workflow.Aggregator = make(map[string]string)
+	}
+
+	for k, v := range mapping {
+		wb.workflow.Aggregator[k] = v
+	}
+
 	return wb
 }
 

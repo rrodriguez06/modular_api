@@ -201,3 +201,100 @@ fmt.Printf("User ID: %s\n", userResponse.Response.ID)
 fmt.Printf("User Name: %s\n", userResponse.Response.Name)
 fmt.Printf("User Email: %s\n", userResponse.Response.Email)
 ```
+
+## Loop Workflow Example
+
+This example demonstrates how to use the loop functionality in a workflow:
+
+```go
+// Define templates
+builder.WithTemplate("API", "GetUser", *template.NewRouteTemplate(
+    "GET", "/users/{{user_id}}",
+))
+builder.WithTemplate("API", "GetUserProjects", *template.NewRouteTemplate(
+    "GET", "/users/{{user_id}}/projects",
+))
+builder.WithTemplate("API", "GetProject", *template.NewRouteTemplate(
+    "GET", "/projects/{{project_id}}",
+))
+
+// Step 1: Get user details
+userStep := modularapi.NewWorkflowStepTemplate("get_user", "Get user details", "API", "GetUser").
+    WithParam("user_id", "{{user_id}}").
+    WithResultMap("response", "user_data")
+
+// Step 2: Get list of project IDs for the user
+projectsStep := modularapi.NewWorkflowStepTemplate("get_projects", "Get project IDs", "API", "GetUserProjects").
+    WithParam("user_id", "{{user_id}}").
+    WithResultMap("response.project_ids", "project_id_list")
+
+// Step 3: Loop over each project ID to get details
+projectDetailsStep := modularapi.NewWorkflowStepTemplate("get_project_details", "Get project details", "API", "GetProject").
+    WithDynamicParam("project_id", "current_project").           // Use current item in the loop
+    WithLoopOver("project_id_list", "current_project").          // Configure as a loop step
+    WithResultMap("response", "project_details_collection")      // Results collected into an array
+
+// Create the workflow with all steps
+builder.WithWorkflow("user_projects", "Get all projects for a user").
+    WithStep(userStep).
+    WithStep(projectsStep).
+    WithStep(projectDetailsStep).
+    Build()
+
+// Execute the workflow
+var result map[string]interface{}
+workflowVars, err := service.ExecuteWorkflow("user_projects", map[string]interface{}{
+    "user_id": "123",
+}, &result)
+
+if err != nil {
+    log.Fatalf("Error executing workflow: %v", err)
+}
+
+// Access the collected results from all loop iterations
+projectDetails := workflowVars["project_details_collection"].([]interface{})
+fmt.Printf("Found %d projects for user\n", len(projectDetails))
+```
+
+## Workflow with Aggregator Example
+
+This example demonstrates how to use the aggregator functionality to structure workflow results:
+
+```go
+// Using the same workflow steps as in the loop example, but adding an aggregator
+builder.WithWorkflow("user_with_projects", "Get user with all projects").
+    WithStep(userStep).
+    WithStep(projectsStep).
+    WithStep(projectDetailsStep).
+    WithAggregator(map[string]string{
+        // Define the structure of the final result
+        "user": "user_data",                               // Include user data
+        "projects": "project_details_collection",          // Include all project details
+        "project_count": "project_details_collection.length", // Count of projects
+        "user_id": "input.user_id",                        // Include original input
+    }).
+    Build()
+
+// Define a type for the structured result
+type DashboardResult struct {
+    User         map[string]interface{}   `json:"user"`
+    Projects     []map[string]interface{} `json:"projects"`
+    ProjectCount int                      `json:"project_count"`
+    UserID       string                   `json:"user_id"`
+}
+
+// Execute the workflow with the structured result
+var dashboardResult DashboardResult
+_, err := service.ExecuteWorkflow("user_with_projects", map[string]interface{}{
+    "user_id": "123",
+}, &dashboardResult)
+
+if err != nil {
+    log.Fatalf("Error executing workflow: %v", err)
+}
+
+// Access the structured data
+fmt.Printf("User: %s\n", dashboardResult.User["name"])
+fmt.Printf("Project Count: %d\n", dashboardResult.ProjectCount)
+fmt.Printf("First Project Name: %s\n", dashboardResult.Projects[0]["name"])
+```
