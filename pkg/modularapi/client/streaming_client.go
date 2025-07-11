@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -53,25 +52,38 @@ func (c *StreamingClient) MakeStreamingRequest(req *http.Request, w http.Respons
 	}
 
 	var responseBuffer bytes.Buffer
-	reader := bufio.NewReader(resp.Body)
+	buffer := make([]byte, 4096) // Use a fixed-size buffer to read chunks of data
+
 	for {
-		line, err := reader.ReadBytes('\n')
+		// Read a chunk of data
+		n, err := resp.Body.Read(buffer)
+
+		// Process any data received, even in case of an error
+		if n > 0 {
+			chunk := buffer[:n]
+
+			// Write chunk to the client
+			if _, writeErr := w.Write(chunk); writeErr != nil {
+				log.GlobalLogger.Errorf("Error writing to response: %v", writeErr)
+				return responseBuffer.String(), fmt.Errorf("error writing to response: %w", writeErr)
+			}
+
+			// Flush to ensure data is sent to the client immediately
+			flusher.Flush()
+
+			// Store in our response buffer
+			responseBuffer.Write(chunk)
+		}
+
+		// Handle any errors after processing data
 		if err != nil {
 			if err == io.EOF {
 				log.GlobalLogger.Info("Streaming request completed")
 				break // End of stream
 			}
 			log.GlobalLogger.Errorf("Error reading from streaming response: %v", err)
-			return "", fmt.Errorf("error reading from streaming response: %w", err)
+			return responseBuffer.String(), fmt.Errorf("error reading from streaming response: %w", err)
 		}
-
-		if _, err := w.Write(line); err != nil {
-			log.GlobalLogger.Errorf("Error writing to response: %v", err)
-			return "", fmt.Errorf("error writing to response: %w", err)
-		}
-
-		flusher.Flush()
-		responseBuffer.Write(line)
 	}
 
 	return responseBuffer.String(), nil
